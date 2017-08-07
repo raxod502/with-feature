@@ -1,0 +1,4 @@
+task checkdoc with-feature.el
+task compile with-feature.el
+task longlines *.el *.md .gitignore .gitmodules .travis.yml checkers/* Makefile
+task toc README.md

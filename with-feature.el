@@ -57,6 +57,37 @@ provided by a feature that may not yet be available (%S).
             (t (user-error "Feature loading unsuccessful, aborting")))))
     `(autoload ,func ,(symbol-name feature) nil ,interactive)))
 
+(defmacro with-feature-eval-or-defer
+    (form &optional lazy-prepare-func &rest args)
+  "Eval FORM immediately or wrap in runtime eval.
+Deferral can only happen if LAZY-PREPARE-FUNC is provided. If it
+is provided, it is called with ARGS, and a nil return value means
+to defer evaluation until runtime."
+  (if (and lazy-prepare-func (null (apply lazy-prepare-func args)))
+      `(eval ',form)
+    ,form))
+
+(defun with-feature-normalize-pseudo-plist (pseudo-plist)
+  "Normalize a pseudo-plist into a regular plist.
+The keywords of the pseudo-plist are taken to the keys of the
+regular plist. The elements between keywords in the pseudo-plist
+are collected into lists, which become the values of the regular
+plist. If two keywords are adjacent, the first one has no effect.
+Elements coming before any keywords have a key of nil in the
+regular plist. If a keyword is specified more than once, the
+latter overrides the former."
+  (let ((keyword nil)
+        (elts nil)
+        (plist nil))
+    (dolist (elt pseudo-plist plist)
+      (if (keywordp elt)
+          (progn
+            (when elts
+              (setq plist (plist-put plist keyword (nreverse elts))))
+            (setq keyword elt)
+            (setq elts nil))
+        (push elt elts)))))
+
 ;;;; Closing remarks
 
 (provide 'with-feature)

@@ -47,11 +47,13 @@ provided by a feature that may not yet be available (%S).
              (error "Loading feature `%S' did not define function `%S'"
                     ',feature ',func))
             (,(apply prepare-func args)
-             (require ',feature)
-             (let ((with-feature-recursive-autoload t))
-               (if (called-interactively-p 'any)
-                   (call-interactively ',func)
-                 (apply ',func args))))
+             (if (require ',feature nil 'noerror)
+                 (let ((with-feature-recursive-autoload t))
+                   (if (called-interactively-p 'any)
+                       (call-interactively ',func)
+                     (apply ',func args)))
+               (error "Deferred autoloading failed: feature `%S' unavailable"
+                      ',feature)))
             (t (user-error "Feature loading unsuccessful, aborting")))))
     `(autoload ,func ,(symbol-name feature) nil ,interactive)))
 

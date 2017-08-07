@@ -65,10 +65,10 @@ is provided, it is called with ARGS, and a nil return value means
 to defer evaluation until runtime."
   (if (and lazy-prepare-func (null (apply lazy-prepare-func args)))
       `(eval ',form)
-    ,form))
+    form))
 
 (defun with-feature-normalize-pseudo-plist (pseudo-plist)
-  "Normalize a pseudo-plist into a regular plist.
+  "Normalize a PSEUDO-PLIST into a regular plist.
 The keywords of the pseudo-plist are taken to the keys of the
 regular plist. The elements between keywords in the pseudo-plist
 are collected into lists, which become the values of the regular

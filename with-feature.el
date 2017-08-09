@@ -57,9 +57,11 @@ latter overrides the former."
 
 (defmacro with-feature-error (string &rest args)
   "Report an `error' from `with-feature'.
+STRING and ARGS are as for `error'.
+
 This is a macro so that it can be used at runtime without
 `with-feature' loaded."
-  `(error (format "with-feature: %s" string) ,@args))
+  `(error (format "with-feature: %s" ,string) ,@args))
 
 ;;;;; Code generation
 
@@ -134,6 +136,7 @@ If no FORMS, return nil."
 
 ;;;; Middleware handling
 
+;;;###autoload
 (defvar with-feature-middleware-alist nil
   "Alist of middleware to be applied by `with-feature'.
 The keys are symbols; for symbol `foo' there should be a function
@@ -166,6 +169,7 @@ For example, if MIDDLEWARE is `split-args', then
 `with-feature-middleware/split-args' is returned."
   (intern (format "with-feature-middleware/%S" middleware)))
 
+;;;###autoload
 (defmacro with-feature-defmiddleware
     (name order arglist &optional docstring &rest body)
   "Define and register a `with-feature' middleware.
@@ -215,6 +219,7 @@ The normalization is done using
 
 ;;;; Primary macro
 
+;;;###autoload
 (defmacro with-feature (feature &rest args)
   "After FEATURE is loaded, perform some actions based on ARGS."
   (let ((state (cons feature args)))

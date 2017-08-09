@@ -18,7 +18,50 @@
 (require 'cl-lib)
 (require 'subr-x)
 
-;;;; Miscellaneous
+;;;; Utility functions
+;;;;; Property lists
+
+(defun with-feature-plist-remove (plist prop)
+  "Remove a value from a property list.
+PLIST is a property list and PROP is the key for the value to
+remove. This is distinct to setting the value to nil using
+`plist-put'. Keys are compared to PROP using `eq'.
+
+The new plist is returned; the original is not modified."
+  (cl-loop for (key val) from ,plist by #'cddr
+           unless (eq key prop)
+           collect key and collect val))
+
+(defun with-feature-normalize-pseudo-plist (pseudo-plist)
+  "Normalize a PSEUDO-PLIST into a regular plist.
+The keywords of the pseudo-plist are taken to the keys of the
+regular plist. The elements between keywords in the pseudo-plist
+are collected into lists, which become the values of the regular
+plist. If two keywords are adjacent, the first one has no effect.
+Elements coming before any keywords have a key of nil in the
+regular plist. If a keyword is specified more than once, the
+latter overrides the former."
+  (let ((keyword nil)
+        (elts nil)
+        (plist nil))
+    (dolist (elt pseudo-plist plist)
+      (if (keywordp elt)
+          (progn
+            (when elts
+              (setq plist (plist-put plist keyword (nreverse elts))))
+            (setq keyword elt)
+            (setq elts nil))
+        (push elt elts)))))
+
+;;;;; Signals
+
+(defmacro with-feature-error (string &rest args)
+  "Report an `error' from `with-feature'.
+This is a macro so that it can be used at runtime without
+`with-feature' loaded."
+  `(error (format "with-feature: %s" string) ,@args))
+
+;;;;; Code generation
 
 (defvar with-feature-recursive-autoload nil
   "Used to detect autoloading failure.
@@ -81,48 +124,6 @@ to defer evaluation until runtime."
       `(eval ',form)
     form))
 
-(defun with-feature-normalize-pseudo-plist (pseudo-plist)
-  "Normalize a PSEUDO-PLIST into a regular plist.
-The keywords of the pseudo-plist are taken to the keys of the
-regular plist. The elements between keywords in the pseudo-plist
-are collected into lists, which become the values of the regular
-plist. If two keywords are adjacent, the first one has no effect.
-Elements coming before any keywords have a key of nil in the
-regular plist. If a keyword is specified more than once, the
-latter overrides the former."
-  (let ((keyword nil)
-        (elts nil)
-        (plist nil))
-    (dolist (elt pseudo-plist plist)
-      (if (keywordp elt)
-          (progn
-            (when elts
-              (setq plist (plist-put plist keyword (nreverse elts))))
-            (setq keyword elt)
-            (setq elts nil))
-        (push elt elts)))))
-
-(defvar with-feature-keyword-alist
-  '((:init . 0)
-    (:config . 1000))
-  "Alist of keywords that have special significance in `with-feature'.
-The keys are keywords, and the values are numbers (not
-necessarily integers) representing their relative ordering. When
-the keywords in a `with-feature' form are processed, they are
-processed in ascending order of the ordering numbers. If two
-keywords have equal ordering, then the one specified earlier in
-the alist is processed first.")
-
-(defun with-feature-keywords ()
-  "Return a list of the keywords in `with-feature-keyword-alist', in order.
-This means the keywords at the beginning of the list have the
-lowest ordering number, and are processed first by
-`with-feature'."
-  (thread-first with-feature-keyword-alist
-    (copy-sequence)
-    (cl-stable-sort #'< :key #'cdr)
-    (thread-last (mapcar #'car))))
-
 (defun with-feature-maybe-progn (forms)
   "Wrap FORMS in a `progn' if necessary, else return the single form.
 If no FORMS, return nil."
@@ -131,46 +132,95 @@ If no FORMS, return nil."
     (1 (car forms))
     (_ `(progn ,@forms))))
 
-(defun with-feature-codegen (state)
-  "Derive code for an expanded `with-feature' form from the STATE."
-  (with-feature-maybe-progn
-   `(,@(plist-get state :init)
-     ,@(when-let ((config (plist-get state :config)))
-         `((with-eval-after-load ',(plist-get state :feature)
-             ,@config))))))
+;;;; Middleware handling
 
-(defun with-feature-keyword-handler (keyword)
-  "Return the symbol for the function that handles given KEYWORD."
-  (thread-first keyword
-    (symbol-name)
-    (substring 1)
-    (thread-last (format "with-feature-keyword-%S"))
-    (intern)))
+(defvar with-feature-middleware-alist nil
+  "Alist of middleware to be applied by `with-feature'.
+The keys are symbols; for symbol `foo' there should be a function
+`with-feature-middleware/foo' which applies the middleware. The
+values are numbers (not necessarily integers) that specify the
+relative ordering of the middleware. Middleware with lower
+ordering is applied first; in the case of a tie, the middleware
+appearing first in the alist is applied first.
 
-(defmacro with-feature-defkeyword
-    (keyword order arglist &optional docstring &rest body)
-  "Define a keyword handler and register it in `with-feature-keyword-alist'.
-KEYWORD is the keyword to register, and ORDER is a number
-representing its precedence relative to other keywords in
-`with-feature-keyword-alist'. ARGLIST, DOCSTRING, and BODY are as
-in `defun'.
+When `with-feature' receives its arguments, it passes them as a
+list to the first middleware function, and threads the return
+value through all remaining middleware functions. The eventual
+expansion of the macro is the return value of the last middleware
+function.
 
-If the keyword has already been registered, this overrides its
-previous handler and resets its order in
-`with-feature-keyword-alist'.
+See also `with-feature-defmiddleware'.")
 
-KEYWORD must be a literal keyword, but ORDER may be computed."
-  (unless (keywordp keyword)
-    (error "Non-keyword registered as keyword: `%S'" keyword))
+(defun with-feature-middlewares ()
+  "Return a list of the middleware in `with-feature-keyword-alist', in order.
+This means the middleware at the beginning of the list have the
+lowest ordering, and are applied first by `with-feature'."
+  (thread-first with-feature-middleware-alist
+    (copy-sequence)
+    (cl-stable-sort #'< :key #'cdr)
+    (thread-last (mapcar #'car))))
+
+(defun with-feature-middleware-handler (middleware)
+  "Return the symbol for the function that handles given MIDDLEWARE, a symbol.
+For example, if MIDDLEWARE is `split-args', then
+`with-feature-middleware/split-args' is returned."
+  (intern (format "with-feature-middleware/%S" middleware)))
+
+(defmacro with-feature-defmiddleware
+    (name order arglist &optional docstring &rest body)
+  "Define and register a `with-feature' middleware.
+NAME is an unquoted symbol, and ORDER is a number, possibly
+computed at runtime. ARGLIST, DOCSTRING, and BODY are as in
+`defun'.
+
+Define a function of the form `with-feature-middleware/NAME', and
+register the middleware in `with-feature-middleware-alist' with
+the provided ORDER."
+  (declare (indent defun))
   (unless (stringp docstring)
     (setq docstring nil)
     (setq body (cons docstring body)))
   `(progn
-     (defun ,(with-feature-keyword-handler keyword) ,arglist
+     (defun ,(with-feature-middleware-handler name) ,arglist
        ,@(when docstring
            (list docstring))
        ,@body)
-     (map-put with-feature-keyword-alist ,keyword ,order)))
+     (map-put with-feature-middleware-alist ',name ,order)))
+
+;;;; Core middleware
+
+(with-feature-defmiddleware split-args 0 (args)
+  "Extract feature and pseudo-plist from `with-feature' ARGS.
+Return a plist of the feature name as a symbol under `:feature',
+and the pseudo-plist under `:pseudo-plist'.
+
+Raise an error if the feature name is not a symbol, but otherwise
+do no validation.
+
+Assume that the ARGS are a list of at least one element."
+  (unless (symbolp (car args))
+    (with-feature-error "Feature `%S' is not symbol" (car args)))
+  `(:feature ,(car args) :pseudo-plist ,(cdr args)))
+
+(with-feature-defmiddleware normalize-pseudo-plist 100 (state)
+  "Normalize the pseudo-plist under key `:pseudo-plist' of STATE.
+Remove its key and put the normalized plist under key `:plist'.
+The normalization is done using
+`with-feature-normalize-pseudo-plist'."
+  (let* ((pseudo-plist (plist-get state :pseudo-plist))
+         (plist (with-feature-normalize-pseudo-plist pseudo-plist)))
+    (thread-first state
+      (with-feature-plist-remove :pseudo-plist)
+      (plist-put :plist plist))))
+
+;;;; Primary macro
+
+(defmacro with-feature (feature &rest args)
+  "After FEATURE is loaded, perform some actions based on ARGS."
+  (let ((state (cons feature args)))
+    (dolist (middleware (with-feature-middlewares) state)
+      (let ((handler (with-feature-middleware-handler middleware)))
+        (setq state (funcall handler state))))))
 
 ;;;; Closing remarks
 

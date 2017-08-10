@@ -16,6 +16,7 @@
 ;;;; Libraries
 
 (require 'cl-lib)
+(require 'map)
 (require 'subr-x)
 
 ;;;; Utility functions
@@ -28,7 +29,7 @@ remove. This is distinct to setting the value to nil using
 `plist-put'. Keys are compared to PROP using `eq'.
 
 The new plist is returned; the original is not modified."
-  (cl-loop for (key val) from ,plist by #'cddr
+  (cl-loop for (key val) on plist by #'cddr
            unless (eq key prop)
            collect key and collect val))
 
@@ -191,37 +192,22 @@ the provided ORDER."
        ,@body)
      (map-put with-feature-middleware-alist ',name ,order)))
 
-;;;; Core middleware
+(defvar with-feature-middleware-features '(with-feature-core)
+  "List of features that provide middleware for `with-feature'.
+These features are all required when a `with-feature' form is
+expanded.
 
-(with-feature-defmiddleware split-args 0 (args)
-  "Extract feature and pseudo-plist from `with-feature' ARGS.
-Return a plist of the feature name as a symbol under `:feature',
-and the pseudo-plist under `:pseudo-plist'.
-
-Raise an error if the feature name is not a symbol, but otherwise
-do no validation.
-
-Assume that the ARGS are a list of at least one element."
-  (unless (symbolp (car args))
-    (with-feature-error "Feature `%S' is not symbol" (car args)))
-  `(:feature ,(car args) :pseudo-plist ,(cdr args)))
-
-(with-feature-defmiddleware normalize-pseudo-plist 100 (state)
-  "Normalize the pseudo-plist under key `:pseudo-plist' of STATE.
-Remove its key and put the normalized plist under key `:plist'.
-The normalization is done using
-`with-feature-normalize-pseudo-plist'."
-  (let* ((pseudo-plist (plist-get state :pseudo-plist))
-         (plist (with-feature-normalize-pseudo-plist pseudo-plist)))
-    (thread-first state
-      (with-feature-plist-remove :pseudo-plist)
-      (plist-put :plist plist))))
+If plugin authors have done their job correctly, the ordering of
+this list does not matter. However, you never know. The features
+will be required in the order they are specified here.")
 
 ;;;; Primary macro
 
 ;;;###autoload
 (defmacro with-feature (feature &rest args)
   "After FEATURE is loaded, perform some actions based on ARGS."
+  (dolist (feature with-feature-middleware-features)
+    (require feature))
   (let ((state (cons feature args)))
     (dolist (middleware (with-feature-middlewares) state)
       (let ((handler (with-feature-middleware-handler middleware)))

@@ -20,6 +20,36 @@
 (require 'subr-x)
 
 ;;;; Utility functions
+;;;;; Functions
+
+(defun with-feature-replace-symbol (form from to)
+  "In FORM, recursively replace symbol FROM with symbol TO.
+This function only recurses through cons cells, and not other
+types of collections.
+
+Warning: if you attempt to replace the symbol nil, one
+side-effect will be to append to every list in the form, since
+lists are nil-terminated implicitly."
+  (cond
+   ((consp form)
+    (cons (with-feature-replace-symbol (car form) from to)
+          (with-feature-replace-symbol (cdr form) from to)))
+   ((eq form from) to)
+   (t form)))
+
+(defmacro with-feature-thread-anaphoric (it symbol &rest forms)
+  "Anaphoric threading macro.
+Binding IT to the given SYMBOL, evaluate the first of FORMS. Then
+re-bind the result to SYMBOL, and evaluate the next of FORMS,
+until FORMS are exhausted. Then return the result."
+  (declare (indent 2))
+  (if forms
+      `(with-feature-thread-anaphoric
+           (let ((it ,it))
+             ,(car forms))
+         (cdr forms))
+    it))
+
 ;;;;; Property lists
 
 (defun with-feature-plist-remove (plist prop)

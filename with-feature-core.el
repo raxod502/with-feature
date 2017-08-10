@@ -37,6 +37,20 @@ The normalization is done using
       (with-feature-plist-remove :pseudo-plist)
       (plist-put :plist plist))))
 
+(with-feature-defmiddleware keyword-init 200 (state)
+  "Copy the code under `:init' into `:code', and remove `:init' key.
+The code is inserted at the end of the accumulated code so that
+the user can take advantage of keybindings and autoloads that
+were previously defined by other keywords.
+
+If `:init' is not specified, then no code is inserted."
+  (with-feature-thread-anaphoric state it
+    (plist-put it :code (append (plist-get it :code)
+                                (thread-first it
+                                  (plist-get :plist)
+                                  (plist-get :init))))
+    (with-feature-plist-remove :init)))
+
 (with-feature-defmiddleware codegen 200 (state)
   "Generate the final code from key `:code' of STATE.
 Assume that `:code' has a list of forms, and optionally wrap them

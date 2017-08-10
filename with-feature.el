@@ -45,9 +45,9 @@ until FORMS are exhausted. Then return the result."
   (declare (indent 2))
   (if forms
       `(with-feature-thread-anaphoric
-           (let ((it ,it))
+           (let ((,symbol ,it))
              ,(car forms))
-         (cdr forms))
+           (cdr forms))
     it))
 
 ;;;;; Property lists

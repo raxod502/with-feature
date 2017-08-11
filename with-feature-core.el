@@ -49,9 +49,42 @@ If `:init' is not specified, then no code is inserted."
                                 (thread-first it
                                   (plist-get :plist)
                                   (plist-get :init))))
-    (with-feature-plist-remove :init)))
+    (plist-put it :plist (with-feature-plist-remove
+                          (plist-get it :plist) :init))))
 
-(with-feature-defmiddleware codegen 200 (state)
+(with-feature-defmiddleware keyword-config 300 (state)
+  "Copy the code under `:config' into `:deferred-code', and remove `:config'.
+The code is inserted at the end of the accumulated
+`:deferred-code' so that it can take advantage of automatically
+generated autoloads, keybindings, and so on.
+
+If `:config' is not specified, then no code is inserted."
+  (with-feature-thread-anaphoric state it
+    (plist-put it :deferred-code (append (plist-get it :deferred-code)
+                                         (thread-first it
+                                           (plist-get :plist)
+                                           (plist-get :config))))
+    (plist-put it :plist (with-feature-plist-remove
+                          (plist-get it :plist) :config))))
+
+(with-feature-defmiddleware wrap-deferred 400 (state)
+  "Wrap `:deferred-code' in `with-eval-after-load', and add to `:code'.
+Remove `:deferred-code'. The `with-eval-after-load' is placed at
+the beginning of the code, so that the rest of the code can take
+advantage of it. This assumes that the feature is registered
+under `:feature'.
+
+If no `:deferred-code' exists, don't add anything."
+  (if-let ((deferred (plist-get state :deferred-code)))
+      (with-feature-thread-anaphoric state it
+        (plist-put it :code (cons `(with-eval-after-load
+                                       ',(plist-get it :feature)
+                                     ,@deferred)
+                                  (plist-get it :code)))
+        (with-feature-plist-remove it :deferred-code))
+    state))
+
+(with-feature-defmiddleware codegen 500 (state)
   "Generate the final code from key `:code' of STATE.
 Assume that `:code' has a list of forms, and optionally wrap them
 in a `progn' using `with-feature-maybe-progn' before returning

@@ -47,7 +47,8 @@ until FORMS are exhausted. Then return the result."
       `(with-feature-thread-anaphoric
            (let ((,symbol ,it))
              ,(car forms))
-           (cdr forms))
+           ,symbol
+         ,@(cdr forms))
     it))
 
 ;;;;; Property lists
@@ -75,7 +76,7 @@ latter overrides the former."
   (let ((keyword nil)
         (elts nil)
         (plist nil))
-    (dolist (elt pseudo-plist plist)
+    (dolist (elt pseudo-plist (plist-put plist keyword elts))
       (if (keywordp elt)
           (progn
             (when elts
@@ -233,15 +234,27 @@ will be required in the order they are specified here.")
 
 ;;;; Primary macro
 
+(defvar with-feature-debug nil
+  "Non-nil means print diagnostic info while expanding `with-feature' forms.")
+
 ;;;###autoload
 (defmacro with-feature (feature &rest args)
   "After FEATURE is loaded, perform some actions based on ARGS."
+  (when with-feature-debug
+    (message "Expanding (with-feature %S) with arguments %S."
+             feature args))
+  (message "Loading middleware-providing features %S."
+           with-feature-middleware-features)
   (dolist (feature with-feature-middleware-features)
     (require feature))
   (let ((state (cons feature args)))
-    (dolist (middleware (with-feature-middlewares) state)
+    (dolist (middleware (with-feature-middlewares)
+                        (prog1 state
+                          (when with-feature-debug
+                            (message "Finished with-feature expansion."))))
       (let ((handler (with-feature-middleware-handler middleware)))
-        (setq state (funcall handler state))))))
+        (setq state (funcall handler state))
+        (message "Middleware %S results in new state %S." middleware state)))))
 
 ;;;; Closing remarks
 

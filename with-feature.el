@@ -87,13 +87,29 @@ latter overrides the former."
 
 ;;;;; Signals
 
+(defun with-feature-error* (string &rest args)
+  "Report an `error' from `with-feature'.
+STRING and ARGS are as for `error'.
+
+See also `with-feature-error' for the macro form of this
+function."
+  (apply #'error (format "with-feature: %s" string) args))
+
 (defmacro with-feature-error (string &rest args)
   "Report an `error' from `with-feature'.
 STRING and ARGS are as for `error'.
 
-This is a macro so that it can be used at runtime without
-`with-feature' loaded."
+See also `with-feature-error*' for the function form of this
+macro."
   `(error (format "with-feature: %s" ,string) ,@args))
+
+(defun with-feature-only-one (list string &rest args)
+  "Return the first element of LIST, or signal error.
+An error is signalled if LIST has either more or fewer than one
+item. STRING and ARGS are as for `error'."
+  (unless (= (length list) 1)
+    (apply #'with-feature-error* string args))
+  (car list))
 
 ;;;;; Code generation
 
@@ -195,11 +211,12 @@ lowest ordering, and are applied first by `with-feature'."
     (cl-stable-sort #'< :key #'cdr)
     (thread-last (mapcar #'car))))
 
-(defun with-feature-middleware-handler (middleware)
-  "Return the symbol for the function that handles given MIDDLEWARE, a symbol.
+(eval-and-compile
+  (defun with-feature-middleware-handler (middleware)
+    "Return the symbol for the function that handles given MIDDLEWARE symbol.
 For example, if MIDDLEWARE is `split-args', then
 `with-feature-middleware/split-args' is returned."
-  (intern (format "with-feature-middleware/%S" middleware)))
+    (intern (format "with-feature-middleware/%S" middleware))))
 
 ;;;###autoload
 (defmacro with-feature-defmiddleware
@@ -223,14 +240,166 @@ the provided ORDER."
        ,@body)
      (map-put with-feature-middleware-alist ',name ,order)))
 
-(defvar with-feature-middleware-features '(with-feature-core)
-  "List of features that provide middleware for `with-feature'.
-These features are all required when a `with-feature' form is
-expanded.
+;;;; Core middleware
+;;;;; Preprocessing middleware
 
-If plugin authors have done their job correctly, the ordering of
-this list does not matter. However, you never know. The features
-will be required in the order they are specified here.")
+(with-feature-defmiddleware split-args 0 (args)
+  "Extract feature and pseudo-plist from `with-feature' ARGS.
+Return a plist of the feature name as a symbol under `:feature',
+and the pseudo-plist under `:pseudo-plist'.
+
+Raise an error if the feature name is not a symbol, but otherwise
+do no validation.
+
+Assume that the ARGS are a list of at least one element."
+  (unless (symbolp (car args))
+    (with-feature-error "Feature `%S' is not symbol" (car args)))
+  `(:feature ,(car args) :pseudo-plist ,(cdr args)))
+
+(with-feature-defmiddleware normalize-pseudo-plist 100 (state)
+  "Normalize the pseudo-plist under key `:pseudo-plist' of STATE.
+Remove its key and put the normalized plist under key `:plist'.
+The normalization is done using
+`with-feature-normalize-pseudo-plist'."
+  (let* ((pseudo-plist (plist-get state :pseudo-plist))
+         (plist (with-feature-normalize-pseudo-plist pseudo-plist)))
+    (thread-first state
+      (with-feature-plist-remove :pseudo-plist)
+      (plist-put :plist plist))))
+
+;;;;; Keyword middleware
+
+(with-feature-defmiddleware keyword-dialect 200 (state)
+  "Validate `:dialect' from the `:plist', and copy it to the top level.
+Remove from `:plist'."
+  (let ((dialect-forms (thread-first state
+                         (plist-get :plist)
+                         (plist-get :dialect))))
+    (when (> (length dialect-forms) 1)
+      (with-feature-error
+       "More than one form passed to :dialect: %S" dialect-forms))
+    ;; If not specified, or keyword given without arguments, assume
+    ;; nil dialect, the default.
+    (let ((dialect (car dialect-forms)))
+      (dolist (attribute dialect)
+        (unless (symbolp attribute)
+          (with-feature-error "Non-symbol `%S' passed to :dialect" attribute)))
+      (with-feature-thread-anaphoric state it
+        (plist-put it :dialect dialect)
+        (plist-put it :plist (with-feature-plist-remove
+                              (plist-get it :plist) :dialect))))))
+
+(with-feature-defmiddleware keyword-init 300 (state)
+  "Copy the code under `:init' into `:code', and remove `:init' key.
+The code is inserted at the end of the accumulated code so that
+the user can take advantage of keybindings and autoloads that
+were previously defined by other keywords.
+
+If `:init' is not specified, then no code is inserted."
+  (with-feature-thread-anaphoric state it
+    (plist-put it :code (append (plist-get it :code)
+                                (thread-first it
+                                  (plist-get :plist)
+                                  (plist-get :init))))
+    (plist-put it :plist (with-feature-plist-remove
+                          (plist-get it :plist) :init))))
+
+(with-feature-defmiddleware keyword-config 400 (state)
+  "Copy the code under `:config' into `:deferred-code', and remove `:config'.
+The code is inserted at the end of the accumulated
+`:deferred-code' so that it can take advantage of automatically
+generated autoloads, keybindings, and so on.
+
+If `:config' is not specified, then no code is inserted."
+  (with-feature-thread-anaphoric state it
+    (plist-put it :deferred-code (append (plist-get it :deferred-code)
+                                         (thread-first it
+                                           (plist-get :plist)
+                                           (plist-get :config))))
+    (plist-put it :plist (with-feature-plist-remove
+                          (plist-get it :plist) :config))))
+
+(defvar with-feature-default-ensure-provider nil
+  "Default value for `:ensure-provider' if none provided.")
+
+(with-feature-defmiddleware keyword-ensure-provider 500 (state)
+  "Copy `:ensure-provider' from `:plist' to top level.
+If absent, substitute `with-feature-default-ensure-provider'. The
+resulting value may be nil, so this must be checked later. Remove
+`:ensure-provider' from `:plist'."
+  (let ((provider (thread-first state
+                    (plist-get :plist)
+                    (plist-get :ensure-provider)
+                    (or with-feature-default-ensure-provider))))
+    (unless (symbolp provider)
+      (with-feature-error
+       "Non-symbol `%S' passed to :ensure-provider keyword" provider))
+    (with-feature-thread-anaphoric state it
+      (plist-put it :ensure-provider provider)
+      (plist-put it :plist (thread-first it
+                             (plist-get :plist)
+                             (with-feature-plist-remove :ensure-provider))))))
+
+(with-feature-defmiddleware keyword-ensure 600 (state)
+  "Copy `:ensure' from `:plist' to top level.
+Depending on dialect, maybe fill in a default value when not
+provided. (Specifically, in a dialect with the `package'
+attribute, the default is to use the feature name. Else the
+default is nil, meaning `:ensure' has no effect.) Remove from
+`:plist'."
+  (let ((ensure (thread-first state
+                  (plist-get :plist)
+                  (plist-get :ensure)
+                  (or (when (memq 'package (plist-get state :dialect))
+                        (plist-get state :feature))))))
+    (with-feature-thread-anaphoric state it
+      (plist-put it :ensure ensure)
+      (plist-put it :plist (thread-first it
+                             (plist-get :plist)
+                             (with-feature-plist-remove :ensure))))))
+
+;;;;; Postprocessing middleware
+
+(with-feature-defmiddleware check-unprocessed-keywords 700 (state)
+  "Error if there are any unprocessed keywords left in `:plist'.
+This includes a nil keyword (meaning some forms were placed in
+`with-feature' before the first keyword). Remove `:plist'."
+  (when-let ((plist (plist-get state :plist)))
+    (if (car plist)
+        (with-feature-error
+         "Unknown keyword `%S'" (car plist))
+      (with-feature-error
+       "Code placed before first keyword: %S" (cadr plist))))
+  (with-feature-plist-remove state :plist))
+
+;; FIXME: here we must check the value of `:ensure' and
+;; `:ensure-provider', and call out to the relevant ensure provider,
+;; as well as possibly insert a runtime eval in the `wrap-deferred'
+;; middleware.
+
+(with-feature-defmiddleware wrap-deferred 800 (state)
+  "Wrap `:deferred-code' in `with-eval-after-load', and add to `:code'.
+Remove `:deferred-code'. The `with-eval-after-load' is placed at
+the beginning of the code, so that the rest of the code can take
+advantage of it. This assumes that the feature is registered
+under `:feature'.
+
+If no `:deferred-code' exists, don't add anything."
+  (if-let ((deferred (plist-get state :deferred-code)))
+      (with-feature-thread-anaphoric state it
+        (plist-put it :code (cons `(with-eval-after-load
+                                       ',(plist-get it :feature)
+                                     ,@deferred)
+                                  (plist-get it :code)))
+        (with-feature-plist-remove it :deferred-code))
+    state))
+
+(with-feature-defmiddleware codegen 900 (state)
+  "Generate the final code from key `:code' of STATE.
+Assume that `:code' has a list of forms, and optionally wrap them
+in a `progn' using `with-feature-maybe-progn' before returning
+the final form."
+  (with-feature-maybe-progn (plist-get state :code)))
 
 ;;;; Primary macro
 
@@ -240,13 +409,10 @@ will be required in the order they are specified here.")
 ;;;###autoload
 (defmacro with-feature (feature &rest args)
   "After FEATURE is loaded, perform some actions based on ARGS."
+  (declare (indent 1))
   (when with-feature-debug
     (message "Expanding (with-feature %S) with arguments %S."
              feature args))
-  (message "Loading middleware-providing features %S."
-           with-feature-middleware-features)
-  (dolist (feature with-feature-middleware-features)
-    (require feature))
   (let ((state (cons feature args)))
     (dolist (middleware (with-feature-middlewares)
                         (prog1 state
@@ -255,6 +421,31 @@ will be required in the order they are specified here.")
       (let ((handler (with-feature-middleware-handler middleware)))
         (setq state (funcall handler state))
         (message "Middleware %S results in new state %S." middleware state)))))
+
+;;;; Dialects
+
+(defmacro with-feature-defdialect (name &rest dialect)
+  "Declare alternate `with-feature' dialect as a user-facing macro.
+NAME is an unquoted symbol naming the macro to be created.
+DIALECT should contain unquoted symbols naming the default
+dialect attributes assigned by this macro, which otherwise acts
+identically to `with-feature'."
+  (declare (indent defun))
+  `(defmacro ,name (feature &rest args)
+     ,(format "After FEATURE is loaded, perform some actions based on ARGS.
+This function acts like `with-feature', but using the
+%S dialect by default."
+              dialect)
+     (declare (indent 1))
+     (when with-feature-debug
+       (message "Expanding (%S %S) with arguments %S."
+                ',name feature args)
+       (message "Dialect is %S." ',dialect))
+     (append (list 'with-feature feature :dialect ',dialect) args)))
+
+(with-feature-defdialect with-package package)
+
+(with-feature-defdialect with-deferred package deferred)
 
 ;;;; Closing remarks
 

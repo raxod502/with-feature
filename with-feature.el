@@ -19,6 +19,9 @@
 (require 'map)
 (require 'subr-x)
 
+(eval-when-compile
+  (require 'package))
+
 ;;;; Utility functions
 ;;;;; Functions
 
@@ -229,7 +232,7 @@ computed at runtime. ARGLIST, DOCSTRING, and BODY are as in
 Define a function of the form `with-feature-middleware/NAME', and
 register the middleware in `with-feature-middleware-alist' with
 the provided ORDER."
-  (declare (indent defun))
+  (declare (indent defun) (doc-string 4))
   (unless (stringp docstring)
     (setq docstring nil)
     (setq body (cons docstring body)))
@@ -335,10 +338,10 @@ resulting value may be nil, so this must be checked later. Remove
       (with-feature-error
        "Non-symbol `%S' passed to :ensure-provider keyword" provider))
     (with-feature-thread-anaphoric state it
-      (plist-put it :ensure-provider provider)
-      (plist-put it :plist (thread-first it
-                             (plist-get :plist)
-                             (with-feature-plist-remove :ensure-provider))))))
+                                   (plist-put it :ensure-provider provider)
+                                   (plist-put it :plist (thread-first it
+                                                          (plist-get :plist)
+                                                          (with-feature-plist-remove :ensure-provider))))))
 
 (with-feature-defmiddleware keyword-ensure 600 (state)
   "Copy `:ensure' from `:plist' to top level.
@@ -372,12 +375,81 @@ This includes a nil keyword (meaning some forms were placed in
        "Code placed before first keyword: %S" (cadr plist))))
   (with-feature-plist-remove state :plist))
 
+;; What do we need from the `:ensure' provider? At compile time, we
+;; want to check if the package has been installed. At compile time,
+;; we also want to activate the package if it's installed. Then at
+;; runtime, we want to install+activate the package if not done
+;; already.
+;;
+;; IOW, we have two actions needed from the provider: activate package
+;; if already installed (and return boolean indicating whether
+;; activation happened), and install+activate package (and throw error
+;; if failed).
+;;
+;; How does this relative to runtime eval? If provider supports lazy
+;; installation, then runtime eval happens only if package is not
+;; installed. Otherwise, runtime eval happens always, unless variable
+;; is customized.
+
+;; What is the logic here? First we get the package name. Then, if the
+;; dialect specifies deferred installation, then insert the code
+;; returned by the LAZY ensure provider.
+
+;; Get the configured `:ensure-provider'. First try a lazy load using
+;; `eval'.
+;;
+;; For NON-LAZY usage: First try a lazy load using `eval'. If that
+;; fails, insert a non-lazy load and wrap config in runtime eval.
+;;
+;; For LAZY usage: First try a lazy load using `eval'. If that fails,
+;; insert a non-lazy load and wrap config in runtime eval.
+
+(defun with-feature-ensure-provider (provider package &optional lazy)
+  "Use `:ensure' PROVIDER to load PACKAGE, optionally with LAZY install.
+PROVIDER is a symbol. This function delegates to the function
+`with-feature-ensure-provider/PROVIDER'. PACKAGE is a symbol
+naming the package to be loaded. LAZY, if given, means that if
+the package is installed, it should be loaded, but it should not
+be installed otherwise. The return value is non-nil if the
+package was actually loaded.
+
+This function does not actually load the package, but rather
+returns code to do that. This code does not require
+`with-feature' to be loaded."
+  (funcall (intern (format "with-feature-ensure-provider/%S" provider))
+           package lazy))
+
+(defun with-feature-ensure-provider/nil (package &optional lazy)
+  "`:ensure' provider for nil.
+See `with-feature-ensure-provider'."
+  t)
+
+(defvar with-feature-package-contents-refreshed-p nil
+  "Whether `package-refresh-contents' has been called in the current session.")
+
+(defun with-feature-ensure-provider/package (package &optional lazy)
+  "`:ensure' provider for package.el.
+See `with-feature-ensure-provider'."
+  `(progn
+     (require 'package)
+     (unless package--initialized
+       (package-initialize))
+     ,@(when lazy
+         (unless (package-installed-p ',package)
+           `((unless (bound-and-true-p with-feature-package-contents-refreshed-p)
+               (package-refresh-contents)
+               (setq with-feature-package-contents-refreshed-p t))
+             (package-install ',package))))))
+
+(with-feature-defmiddleware wrap-ensure 800 (state)
+  )
+
 ;; FIXME: here we must check the value of `:ensure' and
 ;; `:ensure-provider', and call out to the relevant ensure provider,
 ;; as well as possibly insert a runtime eval in the `wrap-deferred'
 ;; middleware.
 
-(with-feature-defmiddleware wrap-deferred 800 (state)
+(with-feature-defmiddleware wrap-deferred 900 (state)
   "Wrap `:deferred-code' in `with-eval-after-load', and add to `:code'.
 Remove `:deferred-code'. The `with-eval-after-load' is placed at
 the beginning of the code, so that the rest of the code can take
@@ -394,7 +466,7 @@ If no `:deferred-code' exists, don't add anything."
         (with-feature-plist-remove it :deferred-code))
     state))
 
-(with-feature-defmiddleware codegen 900 (state)
+(with-feature-defmiddleware codegen 1000 (state)
   "Generate the final code from key `:code' of STATE.
 Assume that `:code' has a list of forms, and optionally wrap them
 in a `progn' using `with-feature-maybe-progn' before returning
